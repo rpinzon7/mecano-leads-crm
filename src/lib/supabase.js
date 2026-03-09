@@ -5,12 +5,11 @@ const anonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
 const workspaceName = import.meta.env.VITE_CRM_WORKSPACE || "mecano-principal";
 
 export const cloudEnabled = Boolean(url && anonKey);
+export const supabase = cloudEnabled ? createClient(url, anonKey) : null;
 
 export function getWorkspaceName() {
   return workspaceName;
 }
-
-const supabase = cloudEnabled ? createClient(url, anonKey) : null;
 
 async function ensureWorkspace() {
   if (!supabase) return null;
@@ -51,4 +50,28 @@ export async function saveWorkspaceToCloud(leads) {
 
   if (error) throw error;
   return data;
+}
+
+export async function signInWithPassword(email, password) {
+  if (!supabase) throw new Error("Supabase no configurado");
+  const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+  if (error) throw error;
+  return data;
+}
+
+export async function signUpWithPassword(email, password, fullName) {
+  if (!supabase) throw new Error("Supabase no configurado");
+  const { data, error } = await supabase.auth.signUp({
+    email,
+    password,
+    options: { data: { full_name: fullName || "" } },
+  });
+  if (error) throw error;
+  return data;
+}
+
+export async function signOutUser() {
+  if (!supabase) return;
+  const { error } = await supabase.auth.signOut();
+  if (error) throw error;
 }
