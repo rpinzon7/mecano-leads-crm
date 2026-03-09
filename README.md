@@ -22,3 +22,17 @@ Copia `.env.example` a `.env` y completa:
 ## Deploy
 Sube a GitHub y Vercel como en la versión cloud.
 Después de cambiar variables, haz **Redeploy** sin cache.
+
+
+## V6.2
+- pipeline comercial actualizado
+- dashboard comercial
+- login de usuarios
+- sincronización en nube
+- panel lateral de edición
+
+
+## V6.3
+- kanban con desplazamiento horizontal
+- columnas al mismo nivel
+- scroll vertical interno por columna
