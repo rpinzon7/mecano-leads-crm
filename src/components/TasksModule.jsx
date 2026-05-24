@@ -13,6 +13,7 @@ function ActionButton({ children, onClick, danger=false, secondary=false, disabl
 }
 function localListsKey(userId){return `mecano-task-lists-${userId||"local"}`}
 function getTaskList(task){return task.task_list||task.list_name||"Pendientes"}
+function getLeadLabel(lead){if(!lead)return "Sin lead asociado";const empresa=String(lead.empresa||"Sin empresa").trim()||"Sin empresa";const proyecto=String(lead.proyecto||"Sin proyecto").trim()||"Sin proyecto";return `${empresa} — ${proyecto}`}
 
 export default function TasksModule({ currentUser, leads, onOpenLead, prefillLead, onPrefillConsumed }){
   const userId=currentUser?.id||"";
@@ -128,7 +129,7 @@ export default function TasksModule({ currentUser, leads, onOpenLead, prefillLea
           <select className="rounded-xl border px-3 py-2" value={draft.task_type||"Hacer seguimiento"} onChange={(e)=>setDraft({...draft,task_type:e.target.value})}>{TASK_TYPES.map((item)=><option key={item}>{item}</option>)}</select>
           <select className="rounded-xl border px-3 py-2" value={draft.priority||"Media"} onChange={(e)=>setDraft({...draft,priority:e.target.value})}>{TASK_PRIORITIES.map((item)=><option key={item}>{item}</option>)}</select>
           <select className="rounded-xl border px-3 py-2" value={draft.status||"Pendiente"} onChange={(e)=>setDraft({...draft,status:e.target.value,completed_at:e.target.value==="Completada"?new Date().toISOString():null})}>{TASK_STATUSES.map((item)=><option key={item}>{item}</option>)}</select>
-          <select className="rounded-xl border px-3 py-2 md:col-span-2" value={draft.lead_id||""} onChange={(e)=>setDraft({...draft,lead_id:e.target.value})}><option value="">Sin lead asociado</option>{(leads||[]).map((lead)=><option key={lead.id} value={String(lead.id)}>{lead.empresa}</option>)}</select>
+          <select className="rounded-xl border px-3 py-2 md:col-span-2" value={draft.lead_id||""} onChange={(e)=>setDraft({...draft,lead_id:e.target.value})}><option value="">Sin lead asociado</option>{(leads||[]).map((lead)=><option key={lead.id} value={String(lead.id)}>{getLeadLabel(lead)}</option>)}</select>
           <div className="space-y-1"><label className="text-xs text-slate-500">Fecha límite</label><input className="w-full rounded-xl border px-3 py-2" type="date" value={draft.due_date||""} onChange={(e)=>setDraft({...draft,due_date:e.target.value})} /></div>
           <div className="space-y-1"><label className="text-xs text-slate-500">Hora</label><input className="w-full rounded-xl border px-3 py-2" type="time" value={draft.due_time||""} onChange={(e)=>setDraft({...draft,due_time:e.target.value})} /></div>
         </div>
@@ -150,7 +151,7 @@ export default function TasksModule({ currentUser, leads, onOpenLead, prefillLea
             <div className="mt-3 grid grid-cols-1 md:grid-cols-3 gap-2 text-xs text-slate-600">
               <div className="rounded-xl bg-slate-50 px-3 py-2"><div className="text-slate-400">Tipo</div><div className="font-medium">{task.task_type}</div></div>
               <div className="rounded-xl bg-slate-50 px-3 py-2"><div className="text-slate-400">Fecha</div><div className="font-medium">{formatDate(task.due_date)}{task.due_time?` · ${task.due_time}`:""}</div></div>
-              <div className="rounded-xl bg-slate-50 px-3 py-2"><div className="text-slate-400">Lead</div><div className="font-medium">{lead?.empresa||"Sin lead asociado"}</div></div>
+              <div className="rounded-xl bg-slate-50 px-3 py-2"><div className="text-slate-400">Lead</div><div className="font-medium">{getLeadLabel(lead)}</div></div>
             </div>
             <div className="mt-3 flex flex-wrap justify-end gap-2">
               {lead&&<ActionButton small onClick={()=>onOpenLead?.(lead.id)}>Abrir lead</ActionButton>}
