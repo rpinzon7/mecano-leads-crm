@@ -14,6 +14,7 @@ function ActionButton({ children, onClick, danger=false, secondary=false, disabl
 function localListsKey(userId){return `mecano-task-lists-${userId||"local"}`}
 function getTaskList(task){return task.task_list||task.list_name||"Pendientes"}
 function getLeadLabel(lead){if(!lead)return "Sin lead asociado";const empresa=String(lead.empresa||"Sin empresa").trim()||"Sin empresa";const proyecto=String(lead.proyecto||"Sin proyecto").trim()||"Sin proyecto";return `${empresa} — ${proyecto}`}
+function normalizeText(value){return String(value||"").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"").trim()}
 
 export default function TasksModule({ currentUser, leads, onOpenLead, prefillLead, onPrefillConsumed }){
   const userId=currentUser?.id||"";
@@ -21,6 +22,10 @@ export default function TasksModule({ currentUser, leads, onOpenLead, prefillLea
   const [loading,setLoading]=useState(false);
   const [error,setError]=useState("");
   const [filter,setFilter]=useState("Abiertas");
+  const [searchQuery,setSearchQuery]=useState("");
+  const [priorityFilter,setPriorityFilter]=useState("Todas");
+  const [typeFilter,setTypeFilter]=useState("Todos");
+  const [leadFilter,setLeadFilter]=useState("Todos");
   const [editingId,setEditingId]=useState(null);
   const [lists,setLists]=useState(DEFAULT_TASK_LISTS);
   const [activeList,setActiveList]=useState(DEFAULT_TASK_LISTS[0]);
@@ -60,11 +65,45 @@ export default function TasksModule({ currentUser, leads, onOpenLead, prefillLea
   },[tasks,lists]);
 
   const visibleTasks=useMemo(()=>{
+    const query=normalizeText(searchQuery);
     let rows=activeList==="Todas"?tasks:tasks.filter((task)=>getTaskList(task)===activeList);
-    if(filter==="Abiertas")return rows.filter((task)=>task.status!=="Completada"&&task.status!=="Cancelada");
-    if(filter==="Todas")return rows;
-    return rows.filter((task)=>taskBucket(task)===filter);
-  },[tasks,filter,activeList]);
+
+    if(filter==="Abiertas")rows=rows.filter((task)=>task.status!=="Completada"&&task.status!=="Cancelada");
+    else if(filter!=="Todas")rows=rows.filter((task)=>taskBucket(task)===filter);
+
+    if(priorityFilter!=="Todas")rows=rows.filter((task)=>task.priority===priorityFilter);
+    if(typeFilter!=="Todos")rows=rows.filter((task)=>task.task_type===typeFilter);
+    if(leadFilter==="Con lead")rows=rows.filter((task)=>Boolean(task.lead_id));
+    if(leadFilter==="Sin lead")rows=rows.filter((task)=>!task.lead_id);
+
+    if(query){
+      rows=rows.filter((task)=>{
+        const lead=task.lead_id?leadMap.get(String(task.lead_id)):null;
+        const haystack=[
+          task.title,
+          task.description,
+          task.task_type,
+          task.status,
+          task.priority,
+          getTaskList(task),
+          task.due_date,
+          task.due_time,
+          lead?.empresa,
+          lead?.proyecto,
+          lead?.contacto,
+          lead?.correo,
+          lead?.telefono,
+          getLeadLabel(lead),
+        ].map(normalizeText).join(" ");
+        return haystack.includes(query);
+      });
+    }
+
+    return rows;
+  },[tasks,filter,activeList,searchQuery,priorityFilter,typeFilter,leadFilter,leadMap]);
+
+  const hasAdvancedFilters=Boolean(searchQuery)||priorityFilter!=="Todas"||typeFilter!=="Todos"||leadFilter!=="Todos";
+  const clearAdvancedFilters=()=>{setSearchQuery("");setPriorityFilter("Todas");setTypeFilter("Todos");setLeadFilter("Todos")};
 
   const resetForm=()=>{setEditingId(null);setDraft(emptyTaskDraft(userId,null,activeList==="Todas"?lists[0]:activeList))};
   const startEdit=(task)=>{setEditingId(task.id);setDraft({...task,due_date:task.due_date||"",due_time:task.due_time||"",lead_id:task.lead_id||"",task_list:getTaskList(task)})};
@@ -104,7 +143,8 @@ export default function TasksModule({ currentUser, leads, onOpenLead, prefillLea
 
     {error&&<div className="rounded-2xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">{error}</div>}
 
-    <div className="grid grid-cols-1 xl:grid-cols-[280px_0.8fr_1.2fr] gap-6">
+    <div className="grid grid-cols-1 xl:grid-cols-[360px_minmax(0,1fr)] gap-6">
+      <div className="space-y-6">
       <aside className="rounded-3xl border bg-white p-5 shadow-sm h-fit">
         <div className="mb-3 text-lg font-semibold">Listas</div>
         <div className="space-y-2">
@@ -136,11 +176,66 @@ export default function TasksModule({ currentUser, leads, onOpenLead, prefillLea
         <textarea className="min-h-24 w-full rounded-xl border px-3 py-2" placeholder="Descripción / notas" value={draft.description||""} onChange={(e)=>setDraft({...draft,description:e.target.value})} />
         <div className="flex justify-end gap-2"><ActionButton onClick={resetForm}>Limpiar</ActionButton><ActionButton type="submit" secondary>{editingId?"Guardar cambios":"Crear tarea"}</ActionButton></div>
       </form>
+      </div>
 
-      <div className="rounded-3xl border bg-white p-5 shadow-sm">
+      <div className="rounded-3xl border bg-white p-5 shadow-sm min-w-0">
         <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-          <div><div className="text-lg font-semibold">{activeList==="Todas"?"Todas las tareas":activeList}</div><div className="text-sm text-slate-500">{loading?"Cargando...":`${visibleTasks.length} tarea(s) visibles`}</div></div>
+          <div>
+            <div className="text-lg font-semibold">{activeList==="Todas"?"Todas las tareas":activeList}</div>
+            <div className="text-sm text-slate-500">{loading?"Cargando...":`${visibleTasks.length} tarea(s) visibles de ${tasks.length} total(es)`}</div>
+          </div>
           <div className="flex flex-wrap gap-2">{["Abiertas","Vencidas","Hoy","Próximas","Completadas","Todas"].map((item)=><button key={item} onClick={()=>setFilter(item)} className={`rounded-full border px-3 py-1 text-sm ${filter===item?"bg-slate-900 text-white border-slate-900":"bg-white text-slate-700 border-slate-200"}`}>{item}</button>)}</div>
+        </div>
+
+        <div className="mb-5 rounded-3xl border border-slate-200 bg-slate-50 p-5 shadow-sm">
+          <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <div className="text-sm font-semibold text-slate-800">Búsqueda y filtros</div>
+              <div className="text-xs text-slate-500">Encuentra tareas por empresa, proyecto, prioridad, tipo o lead asociado.</div>
+            </div>
+            <div className="flex items-center gap-2">
+              {hasAdvancedFilters&&<span className="rounded-full bg-white px-3 py-1 text-xs font-semibold text-slate-600 shadow-sm">{visibleTasks.length} resultado(s)</span>}
+              <ActionButton onClick={clearAdvancedFilters} disabled={!hasAdvancedFilters} small>Limpiar</ActionButton>
+            </div>
+          </div>
+
+          <div className="space-y-4">
+            <div>
+              <label className="mb-1.5 block text-xs font-semibold text-slate-500">Buscar tarea, empresa, proyecto o nota</label>
+              <input
+                className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none transition focus:border-slate-400 focus:ring-4 focus:ring-slate-100"
+                placeholder="Ej: Casablanca, cotización, urgente..."
+                value={searchQuery}
+                onChange={(e)=>setSearchQuery(e.target.value)}
+              />
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+              <div>
+                <label className="mb-1.5 block text-xs font-semibold text-slate-500">Prioridad</label>
+                <select className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm" value={priorityFilter} onChange={(e)=>setPriorityFilter(e.target.value)}>
+                  <option>Todas</option>
+                  {TASK_PRIORITIES.map((item)=><option key={item}>{item}</option>)}
+                </select>
+              </div>
+              <div>
+                <label className="mb-1.5 block text-xs font-semibold text-slate-500">Tipo de tarea</label>
+                <select className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm" value={typeFilter} onChange={(e)=>setTypeFilter(e.target.value)}>
+                  <option>Todos</option>
+                  {TASK_TYPES.map((item)=><option key={item}>{item}</option>)}
+                </select>
+              </div>
+              <div>
+                <label className="mb-1.5 block text-xs font-semibold text-slate-500">Lead asociado</label>
+                <select className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm" value={leadFilter} onChange={(e)=>setLeadFilter(e.target.value)}>
+                  <option>Todos</option>
+                  <option>Con lead</option>
+                  <option>Sin lead</option>
+                </select>
+              </div>
+            </div>
+          </div>
+          {hasAdvancedFilters&&<div className="mt-4 rounded-2xl border border-slate-200 bg-white px-4 py-2 text-xs text-slate-500">Filtro activo · mostrando {visibleTasks.length} resultado(s) de {tasks.length} tarea(s) total(es).</div>}
         </div>
         <div className="space-y-3 max-h-[70vh] overflow-y-auto pr-1">
           {visibleTasks.length?visibleTasks.map((task)=>{const lead=task.lead_id?leadMap.get(String(task.lead_id)):null;const bucket=taskBucket(task);return <div key={task.id} className="rounded-2xl border border-slate-200 p-4 text-sm shadow-sm">
@@ -159,7 +254,7 @@ export default function TasksModule({ currentUser, leads, onOpenLead, prefillLea
               {task.status!=="Completada"&&<ActionButton small secondary onClick={()=>markComplete(task.id)}>Completar</ActionButton>}
               <ActionButton small danger onClick={()=>removeTask(task.id)}>Eliminar</ActionButton>
             </div>
-          </div>}):<div className="rounded-2xl border border-dashed border-slate-200 bg-slate-50 p-8 text-center text-sm text-slate-500">No hay tareas para este filtro o lista.</div>}
+          </div>}):<div className="rounded-2xl border border-dashed border-slate-200 bg-slate-50 p-8 text-center text-sm text-slate-500">No hay tareas para este filtro, búsqueda o lista.</div>}
         </div>
       </div>
     </div>
