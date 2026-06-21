@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { cloudEnabled } from "../lib/supabase";
-import { completeTask, createTask, deleteTask, emptyTaskDraft, loadMyTasks, TASK_PRIORITIES, TASK_STATUSES, TASK_TYPES, updateTask } from "../lib/tasksService";
+import { completeTask, createAlertRecipient, createTask, DEFAULT_ALERT_RECIPIENTS, deleteAlertRecipient, deleteTask, emptyTaskDraft, loadAlertRecipients, loadMyTasks, TASK_PRIORITIES, TASK_STATUSES, TASK_TYPES, updateAlertRecipient, updateTask } from "../lib/tasksService";
 
 const DEFAULT_TASK_LISTS = ["Pendientes", "Seguimientos", "Cotizaciones", "Proveedores", "Administrativo"];
 function todayString(){const d=new Date();const tzOffset=d.getTimezoneOffset()*60000;return new Date(d.getTime()-tzOffset).toISOString().slice(0,10)}
@@ -15,6 +15,103 @@ function localListsKey(userId){return `mecano-task-lists-${userId||"local"}`}
 function getTaskList(task){return task.task_list||task.list_name||"Pendientes"}
 function getLeadLabel(lead){if(!lead)return "Sin lead asociado";const empresa=String(lead.empresa||"Sin empresa").trim()||"Sin empresa";const proyecto=String(lead.proyecto||"Sin proyecto").trim()||"Sin proyecto";return `${empresa} — ${proyecto}`}
 function normalizeText(value){return String(value||"").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"").trim()}
+
+function emptyRecipientDraft(){return {name:"",email:"",whatsapp:"",role:"",active:true}}
+function chooseRecipientFromList(channel, recipients){
+  const activeRecipients=(recipients||[]).filter((person)=>person.active!==false);
+  const label=channel==="email"?"correo":"WhatsApp";
+  const options=activeRecipients.map((person,index)=>`${index+1}. ${person.name}${person.role?` — ${person.role}`:""}`).join("\n");
+  const manualNumber=activeRecipients.length+1;
+  const selected=window.prompt(`Selecciona responsable para enviar alerta por ${label}:\n\n${options||"No hay responsables activos."}\n${manualNumber}. Otro / manual\n\nEscribe el número de la opción:`);
+  if(!selected)return null;
+  const number=Number(String(selected).trim());
+  if(number>=1&&number<=activeRecipients.length)return activeRecipients[number-1];
+  if(number===manualNumber){
+    const name=window.prompt("Nombre del responsable:", "Otro responsable");
+    if(!name)return null;
+    return {id:`manual-${Date.now()}`, name, email:"", whatsapp:"", role:"", active:true, manual:true};
+  }
+  alert("Opción no válida.");
+  return null;
+}
+function formatDateTime(value=new Date()){try{return value.toLocaleString("es-CO",{day:"2-digit",month:"short",year:"numeric",hour:"2-digit",minute:"2-digit"})}catch{return new Date().toISOString()}}
+function getAlertTraceLines(description){return String(description||"").split("\n").map((line)=>line.trim()).filter((line)=>line.includes("[Alerta CRM"))}
+function cleanTaskDescription(description){return String(description||"").split("\n").filter((line)=>!line.includes("[Alerta CRM")).join("\n").trim()}
+function formatAlertTrace(line){
+  const cleaned=String(line||"").replace(/^\[/,"").replace(/\]$/,"");
+  const match=cleaned.match(/^Alerta CRM (.+?) registrada el (.+?) por (.+?) para (.+)$/);
+  if(!match)return {channel:"Alerta",date:"",sender:"",destination:cleaned,raw:cleaned};
+  return {channel:match[1],date:match[2],sender:match[3],destination:match[4],raw:cleaned};
+}
+
+function chooseEmailDeliveryMethod(){
+  const selected=window.prompt([
+    "¿Dónde quieres abrir el correo?",
+    "",
+    "1. Outlook / aplicación predeterminada del equipo",
+    "2. Gmail web",
+    "3. Outlook web",
+    "4. Copiar asunto y mensaje",
+    "",
+    "Escribe el número de la opción:"
+  ].join("\n"), "2");
+  if(!selected)return null;
+  const option=String(selected).trim();
+  if(option==="1")return {id:"mailto",label:"correo app predeterminada"};
+  if(option==="2")return {id:"gmail",label:"correo Gmail web"};
+  if(option==="3")return {id:"outlook_web",label:"correo Outlook web"};
+  if(option==="4")return {id:"copy",label:"correo copiado"};
+  alert("Opción no válida.");
+  return null;
+}
+function openEmailComposer(method, email, subjectText, bodyText){
+  const to=encodeURIComponent(email);
+  const subject=encodeURIComponent(subjectText);
+  const body=encodeURIComponent(bodyText);
+  if(method.id==="gmail"){
+    window.open(`https://mail.google.com/mail/?view=cm&fs=1&to=${to}&su=${subject}&body=${body}`,"_blank","noopener,noreferrer");
+    return "Se abrió Gmail web con el correo prellenado.";
+  }
+  if(method.id==="outlook_web"){
+    window.open(`https://outlook.office.com/mail/deeplink/compose?to=${to}&subject=${subject}&body=${body}`,"_blank","noopener,noreferrer");
+    return "Se abrió Outlook web con el correo prellenado.";
+  }
+  if(method.id==="copy"){
+    const text=`Para: ${email}\nAsunto: ${subjectText}\n\n${bodyText}`;
+    try{navigator.clipboard?.writeText(text)}catch(err){console.warn("No pude copiar al portapapeles",err)}
+    window.prompt("Copia este mensaje y pégalo en tu correo o webmail:", text);
+    return "Se preparó el texto para copiar en el correo o webmail.";
+  }
+  window.location.href=`mailto:${to}?subject=${subject}&body=${body}`;
+  return "Se abrió la aplicación predeterminada de correo.";
+}
+
+function buildAlertSubject(task, lead){const leadName=lead?getLeadLabel(lead):"Sin lead asociado";return `Tarea vencida en CRM Mecano - ${leadName}`}
+function buildAlertBody(task, lead, senderEmail=""){
+  const leadName=lead?getLeadLabel(lead):"Sin lead asociado";
+  return [
+    "Hola,",
+    "",
+    "Tienes una tarea vencida en el CRM Mecano:",
+    "",
+    `Tarea: ${task.title||"Sin título"}`,
+    `Cliente / Proyecto: ${leadName}`,
+    `Tipo: ${task.task_type||"Sin tipo"}`,
+    `Prioridad: ${task.priority||"Sin prioridad"}`,
+    `Fecha límite: ${formatDate(task.due_date)}${task.due_time?` · ${task.due_time}`:""}`,
+    cleanTaskDescription(task.description)?`Notas: ${cleanTaskDescription(task.description)}`:"Notas: Sin descripción",
+    "",
+    "Por favor revisa el CRM, actualiza el estado de la tarea o reprograma el seguimiento si aplica.",
+    "",
+    senderEmail?`Enviado por: ${senderEmail}`:"Enviado desde CRM Mecano",
+  ].join("\n");
+}
+function onlyPhoneDigits(value){return String(value||"").replace(/[^0-9]/g,"")}
+function appendAlertTrace(description, channel, destination, senderEmail){
+  const trace=`[Alerta CRM ${channel} registrada el ${formatDateTime(new Date())} por ${senderEmail||"usuario CRM"} para ${destination||"destinatario no definido"}]`;
+  const base=String(description||"").trim();
+  return base?`${base}\n\n${trace}`:trace;
+}
 
 export default function TasksModule({ currentUser, leads, onOpenLead, prefillLead, onPrefillConsumed }){
   const userId=currentUser?.id||"";
@@ -31,6 +128,11 @@ export default function TasksModule({ currentUser, leads, onOpenLead, prefillLea
   const [activeList,setActiveList]=useState(DEFAULT_TASK_LISTS[0]);
   const [listNameInput,setListNameInput]=useState("");
   const [draft,setDraft]=useState(emptyTaskDraft(userId,null,DEFAULT_TASK_LISTS[0]));
+  const [alertRecipients,setAlertRecipients]=useState(DEFAULT_ALERT_RECIPIENTS);
+  const [recipientsLoading,setRecipientsLoading]=useState(false);
+  const [recipientsError,setRecipientsError]=useState("");
+  const [recipientDraft,setRecipientDraft]=useState(emptyRecipientDraft());
+  const [editingRecipientId,setEditingRecipientId]=useState(null);
 
   const leadMap=useMemo(()=>new Map((leads||[]).map((lead)=>[String(lead.id),lead])),[leads]);
 
@@ -48,7 +150,22 @@ export default function TasksModule({ currentUser, leads, onOpenLead, prefillLea
     finally{setLoading(false)}
   };
 
+  const refreshRecipients=async()=>{
+    if(!cloudEnabled){setRecipientsError("Supabase no está configurado. Se muestran responsables base locales.");setAlertRecipients(DEFAULT_ALERT_RECIPIENTS);return;}
+    try{
+      setRecipientsLoading(true);
+      setRecipientsError("");
+      const rows=await loadAlertRecipients();
+      setAlertRecipients(rows.length?rows:DEFAULT_ALERT_RECIPIENTS);
+    }catch(err){
+      console.error(err);
+      setRecipientsError("No pude cargar la tabla crm_alert_recipients. Ejecuta el SQL incluido en Supabase. Mientras tanto se muestran responsables base locales.");
+      setAlertRecipients(DEFAULT_ALERT_RECIPIENTS);
+    }finally{setRecipientsLoading(false)}
+  };
+
   useEffect(()=>{refresh()},[userId]);
+  useEffect(()=>{refreshRecipients()},[userId]);
   useEffect(()=>{if(prefillLead){setDraft(emptyTaskDraft(userId,prefillLead,activeList));setEditingId(null);onPrefillConsumed?.()}},[prefillLead,userId,activeList]);
 
   const grouped=useMemo(()=>{
@@ -56,6 +173,8 @@ export default function TasksModule({ currentUser, leads, onOpenLead, prefillLea
     for(const task of tasks){base[taskBucket(task)].push(task)}
     return base;
   },[tasks]);
+
+  const overdueCriticalCount=useMemo(()=>grouped.Vencidas.filter((task)=>["Urgente","Alta"].includes(task.priority)).length,[grouped.Vencidas]);
 
   const countsByList=useMemo(()=>{
     const counts={};
@@ -106,16 +225,44 @@ export default function TasksModule({ currentUser, leads, onOpenLead, prefillLea
   const clearAdvancedFilters=()=>{setSearchQuery("");setPriorityFilter("Todas");setTypeFilter("Todos");setLeadFilter("Todos")};
 
   const resetForm=()=>{setEditingId(null);setDraft(emptyTaskDraft(userId,null,activeList==="Todas"?lists[0]:activeList))};
-  const startEdit=(task)=>{setEditingId(task.id);setDraft({...task,due_date:task.due_date||"",due_time:task.due_time||"",lead_id:task.lead_id||"",task_list:getTaskList(task)})};
+  const startEdit=(task)=>{setEditingId(task.id);setDraft({...task,description:cleanTaskDescription(task.description),due_date:task.due_date||"",due_time:task.due_time||"",lead_id:task.lead_id||"",task_list:getTaskList(task)})};
   const addList=()=>{const cleanName=String(listNameInput||"").trim();if(!cleanName)return;const exists=lists.some((item)=>item.toLowerCase()===cleanName.toLowerCase());if(exists){alert("Esa lista ya existe.");return;}const next=[...lists,cleanName];setLists(next);setActiveList(cleanName);setDraft((prev)=>({...prev,task_list:cleanName}));setListNameInput("")};
   const removeList=(name)=>{if(!name)return;const count=countsByList[name]||0;const message=count?`La lista ${name} tiene ${count} tarea(s). No se borrarán las tareas, pero quedarán ocultas hasta reasignarlas. ¿Deseas borrar la lista?`:`¿Borrar la lista ${name}?`;if(!window.confirm(message))return;const next=lists.filter((item)=>item!==name);setLists(next.length?next:DEFAULT_TASK_LISTS);setActiveList(next[0]||DEFAULT_TASK_LISTS[0]);};
+
+  const resetRecipientForm=()=>{setEditingRecipientId(null);setRecipientDraft(emptyRecipientDraft())};
+  const startEditRecipient=(recipient)=>{setEditingRecipientId(recipient.id);setRecipientDraft({name:recipient.name||"",email:recipient.email||"",whatsapp:recipient.whatsapp||"",role:recipient.role||"",active:recipient.active!==false})};
+  const saveRecipient=async(e)=>{
+    e.preventDefault();
+    try{
+      setRecipientsError("");
+      if(editingRecipientId){await updateAlertRecipient(editingRecipientId,recipientDraft)}
+      else{await createAlertRecipient(recipientDraft)}
+      await refreshRecipients();
+      resetRecipientForm();
+    }catch(err){console.error(err);setRecipientsError(err.message||"No pude guardar el responsable. Verifica que la tabla crm_alert_recipients exista en Supabase.")}
+  };
+  const removeRecipient=async(recipient)=>{
+    if(!window.confirm(`¿Eliminar a ${recipient.name} de responsables de alertas?`))return;
+    try{setRecipientsError("");await deleteAlertRecipient(recipient.id);await refreshRecipients();if(editingRecipientId===recipient.id)resetRecipientForm()}
+    catch(err){console.error(err);setRecipientsError("No pude eliminar el responsable.")}
+  };
+  const toggleRecipientActive=async(recipient)=>{
+    try{setRecipientsError("");await updateAlertRecipient(recipient.id,{...recipient,active:recipient.active===false});await refreshRecipients()}
+    catch(err){console.error(err);setRecipientsError("No pude cambiar el estado del responsable.")}
+  };
 
   const saveTask=async(e)=>{
     e.preventDefault();
     try{
       setError("");
-      const payload={...draft,task_list:draft.task_list||activeList||lists[0]};
-      if(editingId){await updateTask(editingId,payload)}else{await createTask(payload,userId)}
+      let payload={...draft,task_list:draft.task_list||activeList||lists[0]};
+      if(editingId){
+        const original=tasks.find((task)=>task.id===editingId);
+        const traces=getAlertTraceLines(original?.description).join("\n\n");
+        const cleanDescription=String(payload.description||"").trim();
+        payload={...payload,description:traces?(cleanDescription?`${cleanDescription}\n\n${traces}`:traces):cleanDescription};
+        await updateTask(editingId,payload)
+      }else{await createTask(payload,userId)}
       await refresh();
       resetForm();
     }catch(err){console.error(err);setError(err.message||"No pude guardar la tarea.")}
@@ -123,6 +270,47 @@ export default function TasksModule({ currentUser, leads, onOpenLead, prefillLea
 
   const markComplete=async(taskId)=>{try{await completeTask(taskId);await refresh()}catch(err){console.error(err);setError("No pude completar la tarea.")}};
   const removeTask=async(taskId)=>{if(!window.confirm("¿Eliminar esta tarea?"))return;try{await deleteTask(taskId);await refresh()}catch(err){console.error(err);setError("No pude eliminar la tarea.")}};
+
+  const registerAlertTrace=async(task, channel, destination)=>{
+    const description=appendAlertTrace(task.description, channel, destination, currentUser?.email||"");
+    await updateTask(task.id,{description});
+    await refresh();
+  };
+
+  const sendOverdueEmailAlert=async(task, lead)=>{
+    const recipient=chooseRecipientFromList("email",alertRecipients);
+    if(!recipient)return;
+    const email=window.prompt(`Correo para ${recipient.name}:`, recipient.email||"");
+    if(!email)return;
+    if(!recipient.manual&&email!==recipient.email){
+      try{await updateAlertRecipient(recipient.id,{...recipient,email});await refreshRecipients()}
+      catch(err){console.warn("No pude actualizar correo del responsable",err)}
+    }
+    const method=chooseEmailDeliveryMethod();
+    if(!method)return;
+    const subjectText=buildAlertSubject(task,lead);
+    const bodyText=buildAlertBody(task,lead,currentUser?.email||"");
+    const openMessage=openEmailComposer(method,email,subjectText,bodyText);
+    try{await registerAlertTrace(task,`por ${method.label}`,`${recipient.name} <${email}>`);alert(`${openMessage} Quedó registrada la trazabilidad en la tarea.`)}
+    catch(err){console.error(err);setError("Se abrió/preparó el correo, pero no pude registrar la trazabilidad en la tarea.")}
+  };
+
+  const sendOverdueWhatsAppAlert=async(task, lead)=>{
+    const recipient=chooseRecipientFromList("whatsapp",alertRecipients);
+    if(!recipient)return;
+    const phone=window.prompt(`WhatsApp de ${recipient.name}, con indicativo de país. Ej: 573001112233`, recipient.whatsapp||"");
+    if(!phone)return;
+    const cleanPhone=onlyPhoneDigits(phone);
+    if(!cleanPhone){alert("Ingresa un número válido para WhatsApp.");return;}
+    if(!recipient.manual&&cleanPhone!==recipient.whatsapp){
+      try{await updateAlertRecipient(recipient.id,{...recipient,whatsapp:cleanPhone});await refreshRecipients()}
+      catch(err){console.warn("No pude actualizar WhatsApp del responsable",err)}
+    }
+    const text=encodeURIComponent(buildAlertBody(task,lead,currentUser?.email||""));
+    window.open(`https://wa.me/${cleanPhone}?text=${text}`,"_blank","noopener,noreferrer");
+    try{await registerAlertTrace(task,"por WhatsApp",`${recipient.name} <+${cleanPhone}>`);alert(`Se abrió WhatsApp para ${recipient.name} con el mensaje prellenado y quedó registrada la trazabilidad en la tarea.`)}
+    catch(err){console.error(err);setError("Se abrió WhatsApp, pero no pude registrar la trazabilidad en la tarea.")}
+  };
 
   return <div className="space-y-6">
     <div className="rounded-3xl border bg-white p-5 shadow-sm">
@@ -143,11 +331,22 @@ export default function TasksModule({ currentUser, leads, onOpenLead, prefillLea
 
     {error&&<div className="rounded-2xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">{error}</div>}
 
+    {grouped.Vencidas.length>0&&<div className="rounded-3xl border border-red-200 bg-red-50 p-5 shadow-sm">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <div className="text-lg font-bold text-red-800">Alertas de tareas vencidas</div>
+          <div className="text-sm text-red-700">Tienes {grouped.Vencidas.length} tarea(s) vencida(s). {overdueCriticalCount>0?`${overdueCriticalCount} son de prioridad alta o urgente.`:""}</div>
+          <div className="mt-1 text-xs text-red-600">Desde cada tarea vencida puedes seleccionar un responsable, abrir correo o WhatsApp prellenado y dejar trazabilidad en la descripción de la tarea.</div>
+        </div>
+        <ActionButton danger onClick={()=>setFilter("Vencidas")}>Ver vencidas</ActionButton>
+      </div>
+    </div>}
+
     <div className="grid grid-cols-1 xl:grid-cols-[360px_minmax(0,1fr)] gap-6">
       <div className="space-y-6">
       <aside className="rounded-3xl border bg-white p-5 shadow-sm h-fit">
         <div className="mb-3 text-lg font-semibold">Listas</div>
-        <div className="space-y-2">
+        <div className="space-y-1.5">
           <button type="button" onClick={()=>setActiveList("Todas")} className={`w-full rounded-xl border px-3 py-2 text-left text-sm ${activeList==="Todas"?"bg-slate-900 text-white border-slate-900":"bg-white text-slate-700"}`}><span>Todas las tareas</span></button>
           {lists.map((name)=><div key={name} className={`flex items-center gap-2 rounded-xl border px-3 py-2 text-sm ${activeList===name?"bg-blue-50 border-blue-200":"bg-white border-slate-200"}`}>
             <button type="button" className="flex-1 text-left" onClick={()=>{setActiveList(name);setDraft((prev)=>({...prev,task_list:name}))}}><div className="font-medium">{name}</div><div className="text-xs text-slate-500">{countsByList[name]||0} tarea(s)</div></button>
@@ -176,6 +375,41 @@ export default function TasksModule({ currentUser, leads, onOpenLead, prefillLea
         <textarea className="min-h-24 w-full rounded-xl border px-3 py-2" placeholder="Descripción / notas" value={draft.description||""} onChange={(e)=>setDraft({...draft,description:e.target.value})} />
         <div className="flex justify-end gap-2"><ActionButton onClick={resetForm}>Limpiar</ActionButton><ActionButton type="submit" secondary>{editingId?"Guardar cambios":"Crear tarea"}</ActionButton></div>
       </form>
+
+      <section className="rounded-3xl border bg-white p-5 shadow-sm space-y-4 h-fit">
+        <div>
+          <div className="text-lg font-semibold">Responsables de alertas</div>
+          <div className="text-sm text-slate-500">Lista central para correos y WhatsApp de tareas vencidas.</div>
+        </div>
+        {recipientsError&&<div className="rounded-2xl border border-amber-200 bg-amber-50 p-3 text-xs text-amber-700">{recipientsError}</div>}
+        <form onSubmit={saveRecipient} className="space-y-2 rounded-2xl border border-slate-200 bg-slate-50 p-3">
+          <input className="w-full rounded-xl border px-3 py-2 text-sm" placeholder="Nombre responsable" value={recipientDraft.name} onChange={(e)=>setRecipientDraft({...recipientDraft,name:e.target.value})} required />
+          <input className="w-full rounded-xl border px-3 py-2 text-sm" placeholder="Correo" value={recipientDraft.email} onChange={(e)=>setRecipientDraft({...recipientDraft,email:e.target.value})} />
+          <input className="w-full rounded-xl border px-3 py-2 text-sm" placeholder="WhatsApp con indicativo. Ej: 573001112233" value={recipientDraft.whatsapp} onChange={(e)=>setRecipientDraft({...recipientDraft,whatsapp:onlyPhoneDigits(e.target.value)})} />
+          <input className="w-full rounded-xl border px-3 py-2 text-sm" placeholder="Cargo / área" value={recipientDraft.role} onChange={(e)=>setRecipientDraft({...recipientDraft,role:e.target.value})} />
+          <label className="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" checked={recipientDraft.active!==false} onChange={(e)=>setRecipientDraft({...recipientDraft,active:e.target.checked})} /> Activo para alertas</label>
+          <div className="flex justify-end gap-2"><ActionButton onClick={resetRecipientForm} small>Cancelar</ActionButton><ActionButton type="submit" secondary small>{editingRecipientId?"Guardar":"Agregar"}</ActionButton></div>
+        </form>
+        <div className="space-y-1.5">
+          {recipientsLoading&&<div className="text-xs text-slate-500">Cargando responsables...</div>}
+          {(alertRecipients||[]).map((recipient)=><div key={recipient.id} className={`rounded-2xl border px-3 py-2 text-xs ${recipient.active===false?"bg-slate-50 text-slate-400":"bg-white text-slate-600"}`}>
+            <div className="flex items-start justify-between gap-2">
+              <div className="min-w-0">
+                <div className="font-semibold text-slate-800">{recipient.name}</div>
+                <div>{recipient.role||"Sin cargo"}</div>
+                <div className="truncate">{recipient.email||"Sin correo"}</div>
+                <div>{recipient.whatsapp?`+${recipient.whatsapp}`:"Sin WhatsApp"}</div>
+              </div>
+              <span className={`rounded-full px-2 py-1 text-[11px] font-semibold ${recipient.active===false?"bg-slate-200 text-slate-500":"bg-emerald-100 text-emerald-700"}`}>{recipient.active===false?"Inactivo":"Activo"}</span>
+            </div>
+            <div className="mt-2 flex flex-wrap justify-end gap-2">
+              <ActionButton small onClick={()=>startEditRecipient(recipient)}>Editar</ActionButton>
+              <ActionButton small onClick={()=>toggleRecipientActive(recipient)}>{recipient.active===false?"Activar":"Desactivar"}</ActionButton>
+              {!recipient.is_default&&<ActionButton small danger onClick={()=>removeRecipient(recipient)}>Eliminar</ActionButton>}
+            </div>
+          </div>)}
+        </div>
+      </section>
       </div>
 
       <div className="rounded-3xl border bg-white p-5 shadow-sm min-w-0">
@@ -237,18 +471,31 @@ export default function TasksModule({ currentUser, leads, onOpenLead, prefillLea
           </div>
           {hasAdvancedFilters&&<div className="mt-4 rounded-2xl border border-slate-200 bg-white px-4 py-2 text-xs text-slate-500">Filtro activo · mostrando {visibleTasks.length} resultado(s) de {tasks.length} tarea(s) total(es).</div>}
         </div>
-        <div className="space-y-3 max-h-[70vh] overflow-y-auto pr-1">
-          {visibleTasks.length?visibleTasks.map((task)=>{const lead=task.lead_id?leadMap.get(String(task.lead_id)):null;const bucket=taskBucket(task);return <div key={task.id} className="rounded-2xl border border-slate-200 p-4 text-sm shadow-sm">
+        <div className="space-y-2 max-h-[82vh] overflow-y-auto pr-2">
+          {visibleTasks.length?visibleTasks.map((task)=>{const lead=task.lead_id?leadMap.get(String(task.lead_id)):null;const bucket=taskBucket(task);const alertTraces=getAlertTraceLines(task.description).map(formatAlertTrace);const cleanDescription=cleanTaskDescription(task.description);return <div key={task.id} className={`rounded-2xl border p-3 text-sm shadow-sm ${bucket==="Vencidas"?"border-red-200 bg-red-50/40":"border-slate-200 bg-white"}`}>
             <div className="flex flex-wrap items-start justify-between gap-3">
-              <div className="min-w-0"><div className="text-base font-semibold text-slate-900">{task.title}</div><div className="mt-1 text-slate-500">{task.description||"Sin descripción"}</div></div>
+              <div className="min-w-0"><div className="text-base font-semibold text-slate-900">{task.title}</div><div className="mt-1 whitespace-pre-line text-slate-500">{cleanDescription||"Sin descripción"}</div></div>
               <div className="flex flex-wrap gap-2"><span className="rounded-full border border-slate-200 bg-slate-50 px-2.5 py-1 text-xs font-semibold text-slate-600">{getTaskList(task)}</span><span className={`rounded-full border px-2.5 py-1 text-xs font-semibold ${badgeClass(bucket)}`}>{bucket}</span><span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${priorityClass(task.priority)}`}>{task.priority}</span></div>
             </div>
-            <div className="mt-3 grid grid-cols-1 md:grid-cols-3 gap-2 text-xs text-slate-600">
-              <div className="rounded-xl bg-slate-50 px-3 py-2"><div className="text-slate-400">Tipo</div><div className="font-medium">{task.task_type}</div></div>
-              <div className="rounded-xl bg-slate-50 px-3 py-2"><div className="text-slate-400">Fecha</div><div className="font-medium">{formatDate(task.due_date)}{task.due_time?` · ${task.due_time}`:""}</div></div>
-              <div className="rounded-xl bg-slate-50 px-3 py-2"><div className="text-slate-400">Lead</div><div className="font-medium">{getLeadLabel(lead)}</div></div>
+            <div className="mt-2 grid grid-cols-1 md:grid-cols-3 gap-2 text-xs text-slate-600">
+              <div className="rounded-xl bg-slate-50 px-3 py-1.5"><div className="text-slate-400">Tipo</div><div className="font-medium">{task.task_type}</div></div>
+              <div className="rounded-xl bg-slate-50 px-3 py-1.5"><div className="text-slate-400">Fecha</div><div className="font-medium">{formatDate(task.due_date)}{task.due_time?` · ${task.due_time}`:""}</div></div>
+              <div className="rounded-xl bg-slate-50 px-3 py-1.5"><div className="text-slate-400">Lead</div><div className="font-medium">{getLeadLabel(lead)}</div></div>
             </div>
-            <div className="mt-3 flex flex-wrap justify-end gap-2">
+            {alertTraces.length>0&&<div className="mt-2 rounded-xl border border-slate-200 bg-white p-2.5 text-xs text-slate-600">
+              <div className="mb-1.5 font-semibold text-slate-800">Historial de alertas</div>
+              <div className="space-y-1.5">
+                {alertTraces.map((trace,index)=><div key={`${task.id}-trace-${index}`} className="grid grid-cols-1 gap-1 rounded-lg bg-slate-50 px-2.5 py-1.5 md:grid-cols-4">
+                  <div><span className="text-slate-400">Fecha</span><br/><span className="font-medium text-slate-700">{trace.date||"Sin fecha"}</span></div>
+                  <div><span className="text-slate-400">Canal</span><br/><span className="font-medium text-slate-700">{trace.channel}</span></div>
+                  <div><span className="text-slate-400">Responsable</span><br/><span className="font-medium text-slate-700">{trace.destination}</span></div>
+                  <div><span className="text-slate-400">Registrado por</span><br/><span className="font-medium text-slate-700">{trace.sender||"usuario CRM"}</span></div>
+                </div>)}
+              </div>
+            </div>}
+            <div className="mt-2 flex flex-wrap justify-end gap-2">
+              {bucket==="Vencidas"&&task.status!=="Completada"&&<ActionButton small onClick={()=>sendOverdueEmailAlert(task,lead)}>Correo responsable</ActionButton>}
+              {bucket==="Vencidas"&&task.status!=="Completada"&&<ActionButton small onClick={()=>sendOverdueWhatsAppAlert(task,lead)}>WhatsApp responsable</ActionButton>}
               {lead&&<ActionButton small onClick={()=>onOpenLead?.(lead.id)}>Abrir lead</ActionButton>}
               <ActionButton small onClick={()=>startEdit(task)}>Editar</ActionButton>
               {task.status!=="Completada"&&<ActionButton small secondary onClick={()=>markComplete(task.id)}>Completar</ActionButton>}

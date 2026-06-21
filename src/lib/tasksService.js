@@ -1,6 +1,7 @@
 import { cloudEnabled, supabase } from "./supabase";
 
 const TASKS_TABLE = "crm_tasks";
+const ALERT_RECIPIENTS_TABLE = "crm_alert_recipients";
 
 export const TASK_TYPES = [
   "Llamar cliente",
@@ -16,10 +17,28 @@ export const TASK_TYPES = [
 export const TASK_STATUSES = ["Pendiente", "En proceso", "Completada", "Cancelada"];
 export const TASK_PRIORITIES = ["Baja", "Media", "Alta", "Urgente"];
 
+export const DEFAULT_ALERT_RECIPIENTS = [
+  { id: "ricardo", name: "Ricardo Pinzón", email: "", whatsapp: "", role: "Dirección", active: true, is_default: true },
+  { id: "alejandra", name: "Alejandra Carmona", email: "", whatsapp: "", role: "Administración", active: true, is_default: true },
+  { id: "luz-dary", name: "Luz Dary Posada", email: "", whatsapp: "", role: "Comercial", active: true, is_default: true },
+  { id: "armando", name: "Armando Pérez", email: "", whatsapp: "", role: "Comercial", active: true, is_default: true },
+  { id: "manuela", name: "Manuela Peña", email: "", whatsapp: "", role: "Contabilidad", active: true, is_default: true },
+];
+
 function requireCloud() {
   if (!cloudEnabled || !supabase) {
     throw new Error("Supabase no está configurado. El módulo de tareas requiere modo nube.");
   }
+}
+
+function cleanRecipientPayload(recipient = {}) {
+  return {
+    name: String(recipient.name || "").trim(),
+    email: String(recipient.email || "").trim(),
+    whatsapp: String(recipient.whatsapp || "").replace(/[^0-9]/g, ""),
+    role: String(recipient.role || "").trim() || null,
+    active: recipient.active !== false,
+  };
 }
 
 export function emptyTaskDraft(userId = "", lead = null, taskList = "Pendientes") {
@@ -94,5 +113,40 @@ export async function completeTask(taskId) {
 export async function deleteTask(taskId) {
   requireCloud();
   const { error } = await supabase.from(TASKS_TABLE).delete().eq("id", taskId);
+  if (error) throw error;
+}
+
+export async function loadAlertRecipients() {
+  requireCloud();
+  const { data, error } = await supabase
+    .from(ALERT_RECIPIENTS_TABLE)
+    .select("*")
+    .order("active", { ascending: false })
+    .order("name", { ascending: true });
+  if (error) throw error;
+  return Array.isArray(data) ? data : [];
+}
+
+export async function createAlertRecipient(recipient) {
+  requireCloud();
+  const payload = cleanRecipientPayload(recipient);
+  if (!payload.name) throw new Error("El responsable necesita nombre.");
+  const { data, error } = await supabase.from(ALERT_RECIPIENTS_TABLE).insert(payload).select().single();
+  if (error) throw error;
+  return data;
+}
+
+export async function updateAlertRecipient(recipientId, patch) {
+  requireCloud();
+  const payload = { ...cleanRecipientPayload(patch), updated_at: new Date().toISOString() };
+  if (patch.active === undefined) delete payload.active;
+  const { data, error } = await supabase.from(ALERT_RECIPIENTS_TABLE).update(payload).eq("id", recipientId).select().single();
+  if (error) throw error;
+  return data;
+}
+
+export async function deleteAlertRecipient(recipientId) {
+  requireCloud();
+  const { error } = await supabase.from(ALERT_RECIPIENTS_TABLE).delete().eq("id", recipientId);
   if (error) throw error;
 }
