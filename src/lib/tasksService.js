@@ -2,6 +2,7 @@ import { cloudEnabled, supabase } from "./supabase";
 
 const TASKS_TABLE = "crm_tasks";
 const ALERT_RECIPIENTS_TABLE = "crm_alert_recipients";
+const TASK_USERS_TABLE = "crm_task_users";
 
 export const TASK_TYPES = [
   "Llamar cliente",
@@ -25,6 +26,12 @@ export const DEFAULT_ALERT_RECIPIENTS = [
   { id: "manuela", name: "Manuela Peña", email: "", whatsapp: "", role: "Contabilidad", active: true, is_default: true },
 ];
 
+export const TASK_ROLES = {
+  USER: "user",
+  TASK_ADMIN: "task_admin",
+  ADMIN: "admin",
+};
+
 function requireCloud() {
   if (!cloudEnabled || !supabase) {
     throw new Error("Supabase no está configurado. El módulo de tareas requiere modo nube.");
@@ -39,6 +46,34 @@ function cleanRecipientPayload(recipient = {}) {
     role: String(recipient.role || "").trim() || null,
     active: recipient.active !== false,
   };
+}
+
+function cleanTaskUserPayload(user = {}) {
+  return {
+    user_id: user.user_id || user.id || null,
+    email: String(user.email || "").trim().toLowerCase(),
+    full_name: String(user.full_name || user.name || user.email || "").trim(),
+    role: user.role || TASK_ROLES.USER,
+    active: user.active !== false,
+    can_delete_tasks: Boolean(user.can_delete_tasks),
+  };
+}
+
+export function getTaskUserLabel(user) {
+  if (!user) return "Usuario no encontrado";
+  const name = String(user.full_name || user.name || user.email || "Usuario").trim();
+  const email = String(user.email || "").trim();
+  return email && email !== name ? `${name} <${email}>` : name;
+}
+
+export function isTaskAdminProfile(profile) {
+  if (!profile) return false;
+  return profile.role === TASK_ROLES.TASK_ADMIN || profile.role === TASK_ROLES.ADMIN;
+}
+
+export function canDeleteAnyTask(profile) {
+  if (!profile) return false;
+  return profile.role === TASK_ROLES.ADMIN || profile.role === TASK_ROLES.TASK_ADMIN || profile.can_delete_tasks === true;
 }
 
 export function emptyTaskDraft(userId = "", lead = null, taskList = "Pendientes") {
@@ -56,19 +91,87 @@ export function emptyTaskDraft(userId = "", lead = null, taskList = "Pendientes"
   };
 }
 
-export async function loadMyTasks(userId) {
+export async function loadTaskProfile(user) {
+  requireCloud();
+  const fallback = {
+    id: user?.id || "",
+    user_id: user?.id || "",
+    email: String(user?.email || "").toLowerCase(),
+    full_name: user?.user_metadata?.full_name || user?.email || "Usuario",
+    role: TASK_ROLES.USER,
+    active: true,
+    can_delete_tasks: false,
+  };
+  if (!user?.id) return fallback;
+
+  const { data, error } = await supabase
+    .from(TASK_USERS_TABLE)
+    .select("*")
+    .eq("user_id", user.id)
+    .maybeSingle();
+
+  if (error) {
+    console.warn("No pude cargar el perfil de tareas. Se usará perfil básico.", error);
+    return fallback;
+  }
+
+  return data ? { ...fallback, ...data } : fallback;
+}
+
+export async function loadTaskUsers(currentUser) {
+  requireCloud();
+  const fallback = currentUser?.id
+    ? [{
+        id: currentUser.id,
+        user_id: currentUser.id,
+        email: String(currentUser.email || "").toLowerCase(),
+        full_name: currentUser.user_metadata?.full_name || currentUser.email || "Usuario actual",
+        role: TASK_ROLES.USER,
+        active: true,
+        can_delete_tasks: false,
+      }]
+    : [];
+
+  const { data, error } = await supabase
+    .from(TASK_USERS_TABLE)
+    .select("*")
+    .eq("active", true)
+    .order("full_name", { ascending: true });
+
+  if (error) {
+    console.warn("No pude cargar usuarios de tareas. Se usará usuario actual.", error);
+    return fallback;
+  }
+
+  const rows = Array.isArray(data) ? data : [];
+  if (!rows.length) return fallback;
+  return rows;
+}
+
+export async function loadTasks(userId, options = {}) {
   requireCloud();
   if (!userId) return [];
-  const { data, error } = await supabase
+  const { viewMode = "mine", assignedTo = "Todos", isAdmin = false } = options;
+  let query = supabase
     .from(TASKS_TABLE)
     .select("*")
-    .eq("assigned_to", userId)
     .order("due_date", { ascending: true, nullsFirst: false })
     .order("due_time", { ascending: true, nullsFirst: false })
     .order("created_at", { ascending: false });
 
+  if (!isAdmin || viewMode === "mine") {
+    query = query.eq("assigned_to", userId);
+  } else if (assignedTo && assignedTo !== "Todos") {
+    query = query.eq("assigned_to", assignedTo);
+  }
+
+  const { data, error } = await query;
   if (error) throw error;
   return Array.isArray(data) ? data : [];
+}
+
+export async function loadMyTasks(userId) {
+  return loadTasks(userId, { viewMode: "mine", isAdmin: false });
 }
 
 export async function createTask(task, userId) {
@@ -149,4 +252,23 @@ export async function deleteAlertRecipient(recipientId) {
   requireCloud();
   const { error } = await supabase.from(ALERT_RECIPIENTS_TABLE).delete().eq("id", recipientId);
   if (error) throw error;
+}
+
+export async function createTaskUser(user) {
+  requireCloud();
+  const payload = cleanTaskUserPayload(user);
+  if (!payload.user_id) throw new Error("El usuario necesita el ID de Supabase Auth.");
+  if (!payload.email) throw new Error("El usuario necesita correo.");
+  const { data, error } = await supabase.from(TASK_USERS_TABLE).insert(payload).select().single();
+  if (error) throw error;
+  return data;
+}
+
+export async function updateTaskUser(userId, patch) {
+  requireCloud();
+  const payload = { ...cleanTaskUserPayload(patch), updated_at: new Date().toISOString() };
+  delete payload.user_id;
+  const { data, error } = await supabase.from(TASK_USERS_TABLE).update(payload).eq("user_id", userId).select().single();
+  if (error) throw error;
+  return data;
 }
