@@ -15,6 +15,82 @@ function localListsKey(userId){return `mecano-task-lists-${userId||"local"}`}
 function getTaskList(task){return task.task_list||task.list_name||"Pendientes"}
 function getLeadLabel(lead){if(!lead)return "Sin lead asociado";const empresa=String(lead.empresa||"Sin empresa").trim()||"Sin empresa";const proyecto=String(lead.proyecto||"Sin proyecto").trim()||"Sin proyecto";return `${empresa} — ${proyecto}`}
 function normalizeText(value){return String(value||"").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"").trim()}
+function priorityWeight(priority){if(priority==="Urgente")return 4;if(priority==="Alta")return 3;if(priority==="Media")return 2;if(priority==="Baja")return 1;return 0}
+function statusWeight(status){if(status==="Completada")return -20;if(status==="Cancelada")return -25;return 0}
+function dueDistanceDays(task){if(!task?.due_date)return 9999;const today=new Date(`${todayString()}T00:00:00`);const due=new Date(`${task.due_date}T00:00:00`);if(Number.isNaN(due.getTime()))return 9999;return Math.round((due.getTime()-today.getTime())/86400000)}
+function taskOperationalScore(task){
+  const bucket=taskBucket(task);
+  let score=statusWeight(task.status);
+  if(bucket==="Vencidas")score+=100;
+  else if(bucket==="Hoy")score+=80;
+  else if(bucket==="Próximas")score+=45;
+  else if(bucket==="Sin fecha")score+=25;
+  score+=priorityWeight(task.priority)*12;
+  if(task.lead_id)score+=5;
+  if(!task.assigned_to)score+=25;
+  const days=dueDistanceDays(task);
+  if(days>=0&&days<9999)score+=Math.max(0,20-days);
+  return score;
+}
+function operationalPriorityLabel(task){const score=taskOperationalScore(task);if(score>=120)return "Crítica";if(score>=85)return "Alta";if(score>=55)return "Media";return "Normal"}
+function operationalPriorityClass(label){if(label==="Crítica")return "bg-red-600 text-white";if(label==="Alta")return "bg-orange-100 text-orange-700";if(label==="Media")return "bg-blue-100 text-blue-700";return "bg-slate-100 text-slate-600"}
+function compareTasksByWorkPriority(a,b){
+  const scoreDiff=taskOperationalScore(b)-taskOperationalScore(a);
+  if(scoreDiff!==0)return scoreDiff;
+  const dueA=a.due_date||"9999-12-31";
+  const dueB=b.due_date||"9999-12-31";
+  if(dueA!==dueB)return dueA.localeCompare(dueB);
+  return priorityWeight(b.priority)-priorityWeight(a.priority);
+}
+
+function addDays(value, amount){
+  const base=new Date(`${value||todayString()}T00:00:00`);
+  base.setDate(base.getDate()+amount);
+  const tzOffset=base.getTimezoneOffset()*60000;
+  return new Date(base.getTime()-tzOffset).toISOString().slice(0,10);
+}
+function startOfWeek(value){
+  const base=new Date(`${value||todayString()}T00:00:00`);
+  const day=base.getDay();
+  const mondayOffset=day===0?-6:1-day;
+  return addDays(value,mondayOffset);
+}
+function startOfMonth(value){return String(value||todayString()).slice(0,8)+"01"}
+function addMonths(value, amount){
+  const base=new Date(`${value||todayString()}T00:00:00`);
+  base.setMonth(base.getMonth()+amount,1);
+  const tzOffset=base.getTimezoneOffset()*60000;
+  return new Date(base.getTime()-tzOffset).toISOString().slice(0,10);
+}
+function getCalendarDates(view, focusDate){
+  if(view==="day")return [focusDate||todayString()];
+  if(view==="week"){
+    const start=startOfWeek(focusDate);
+    return Array.from({length:7},(_,index)=>addDays(start,index));
+  }
+  const monthStart=startOfMonth(focusDate);
+  const gridStart=startOfWeek(monthStart);
+  return Array.from({length:42},(_,index)=>addDays(gridStart,index));
+}
+function calendarTitle(view, focusDate){
+  const date=new Date(`${focusDate||todayString()}T00:00:00`);
+  if(view==="day")return date.toLocaleDateString("es-CO",{weekday:"long",day:"2-digit",month:"long",year:"numeric"});
+  if(view==="week"){
+    const start=startOfWeek(focusDate);
+    const end=addDays(start,6);
+    const a=new Date(`${start}T00:00:00`);
+    const b=new Date(`${end}T00:00:00`);
+    return `${a.toLocaleDateString("es-CO",{day:"2-digit",month:"short"})} - ${b.toLocaleDateString("es-CO",{day:"2-digit",month:"short",year:"numeric"})}`;
+  }
+  return date.toLocaleDateString("es-CO",{month:"long",year:"numeric"});
+}
+function calendarStep(view){if(view==="day")return 1;if(view==="week")return 7;return 0}
+function isSameMonth(dateKey, focusDate){return String(dateKey||"").slice(0,7)===String(focusDate||todayString()).slice(0,7)}
+function dayLabel(dateKey, compact=false){
+  const d=new Date(`${dateKey}T00:00:00`);
+  return d.toLocaleDateString("es-CO",compact?{weekday:"short",day:"2-digit"}:{weekday:"short",day:"2-digit",month:"short"});
+}
+function calendarTaskBorder(task){const bucket=taskBucket(task);if(bucket==="Vencidas")return "border-red-200 bg-red-50";if(task.priority==="Urgente"||task.priority==="Alta")return "border-orange-200 bg-orange-50";if(bucket==="Hoy")return "border-amber-200 bg-amber-50";if(bucket==="Completadas")return "border-emerald-200 bg-emerald-50";return "border-slate-200 bg-white"}
 
 function emptyRecipientDraft(){return {name:"",email:"",whatsapp:"",role:"",active:true}}
 function chooseRecipientFromList(channel, recipients){
@@ -86,13 +162,22 @@ function openEmailComposer(method, email, subjectText, bodyText){
   return "Se abrió la aplicación predeterminada de correo.";
 }
 
-function buildAlertSubject(task, lead){const leadName=lead?getLeadLabel(lead):"Sin lead asociado";return `Tarea vencida en CRM Mecano - ${leadName}`}
+function getTaskTimeLabel(task){
+  const bucket=taskBucket(task);
+  if(bucket==="Vencidas")return "vencida";
+  if(bucket==="Hoy")return "programada para hoy";
+  if(bucket==="Próximas")return "próxima";
+  if(bucket==="Sin fecha")return "pendiente sin fecha";
+  return "pendiente";
+}
+function buildAlertSubject(task, lead){const leadName=lead?getLeadLabel(lead):"Sin lead asociado";const timeLabel=getTaskTimeLabel(task);return `Recordatorio de tarea ${timeLabel} en CRM Mecano - ${leadName}`}
 function buildAlertBody(task, lead, senderEmail=""){
   const leadName=lead?getLeadLabel(lead):"Sin lead asociado";
+  const timeLabel=getTaskTimeLabel(task);
   return [
     "Hola,",
     "",
-    "Tienes una tarea vencida en el CRM Mecano:",
+    `Tienes una tarea ${timeLabel} en el CRM Mecano:`,
     "",
     `Tarea: ${task.title||"Sin título"}`,
     `Cliente / Proyecto: ${leadName}`,
@@ -125,6 +210,11 @@ export default function TasksModule({ currentUser, leads, onOpenLead, prefillLea
   const [leadFilter,setLeadFilter]=useState("Todos");
   const [responsibleFilter,setResponsibleFilter]=useState("Todos");
   const [taskViewMode,setTaskViewMode]=useState("mine");
+  const [displayMode,setDisplayMode]=useState("list");
+  const [calendarView,setCalendarView]=useState("week");
+  const [calendarDate,setCalendarDate]=useState(todayString());
+  const [draggingTaskId,setDraggingTaskId]=useState(null);
+  const [calendarActionMessage,setCalendarActionMessage]=useState("");
   const [editingId,setEditingId]=useState(null);
   const [lists,setLists]=useState(DEFAULT_TASK_LISTS);
   const [activeList,setActiveList]=useState(DEFAULT_TASK_LISTS[0]);
@@ -254,8 +344,63 @@ export default function TasksModule({ currentUser, leads, onOpenLead, prefillLea
       });
     }
 
-    return rows;
+    return [...rows].sort(compareTasksByWorkPriority);
   },[tasks,filter,activeList,searchQuery,priorityFilter,typeFilter,leadFilter,responsibleFilter,isTaskAdmin,leadMap,taskUserMap,taskUserOptions]);
+
+  const calendarTasksByDate=useMemo(()=>{
+    const map=new Map();
+    for(const task of visibleTasks){
+      if(!task.due_date)continue;
+      const key=String(task.due_date).slice(0,10);
+      if(!map.has(key))map.set(key,[]);
+      map.get(key).push(task);
+    }
+    for(const [key,items] of map.entries())map.set(key,[...items].sort(compareTasksByWorkPriority));
+    return map;
+  },[visibleTasks]);
+  const calendarDates=useMemo(()=>getCalendarDates(calendarView,calendarDate),[calendarView,calendarDate]);
+  const undatedCalendarTasks=useMemo(()=>visibleTasks.filter((task)=>!task.due_date&&task.status!=="Completada"&&task.status!=="Cancelada").sort(compareTasksByWorkPriority),[visibleTasks]);
+  const moveCalendar=(direction)=>{
+    if(calendarView==="month")setCalendarDate((prev)=>addMonths(prev,direction));
+    else setCalendarDate((prev)=>addDays(prev,direction*calendarStep(calendarView)));
+  };
+
+  const updateTaskDateFromCalendar=async(taskId,dueDate)=>{
+    const task=tasks.find((item)=>String(item.id)===String(taskId));
+    if(!task?.id)return;
+    try{
+      setError("");
+      setCalendarActionMessage("");
+      await updateTask(task.id,{due_date:dueDate||null});
+      if(String(editingId)===String(task.id))setDraft((prev)=>({...prev,due_date:dueDate||""}));
+      await refresh();
+      setCalendarActionMessage(dueDate?`Tarea reprogramada para ${formatDate(dueDate)}.`:"Tarea movida a sin fecha.");
+    }catch(err){
+      console.error(err);
+      setError("No pude reprogramar la tarea desde el calendario.");
+    }
+  };
+  const handleCalendarDragStart=(event,task)=>{
+    if(!task?.id)return;
+    setDraggingTaskId(task.id);
+    try{event.dataTransfer.setData("text/plain",String(task.id));event.dataTransfer.effectAllowed="move"}catch(err){console.warn("No pude preparar arrastre de tarea",err)}
+  };
+  const handleCalendarDragEnd=()=>setDraggingTaskId(null);
+  const handleCalendarDragOver=(event)=>{event.preventDefault();try{event.dataTransfer.dropEffect="move"}catch{}};
+  const handleCalendarDrop=async(event,dateKey)=>{
+    event.preventDefault();
+    const taskId=event.dataTransfer?.getData("text/plain")||draggingTaskId;
+    setDraggingTaskId(null);
+    if(!taskId)return;
+    await updateTaskDateFromCalendar(taskId,dateKey);
+  };
+  const handleUndatedDrop=async(event)=>{
+    event.preventDefault();
+    const taskId=event.dataTransfer?.getData("text/plain")||draggingTaskId;
+    setDraggingTaskId(null);
+    if(!taskId)return;
+    await updateTaskDateFromCalendar(taskId,null);
+  };
 
   const hasAdvancedFilters=Boolean(searchQuery)||priorityFilter!=="Todas"||typeFilter!=="Todos"||leadFilter!=="Todos";
   const clearAdvancedFilters=()=>{setSearchQuery("");setPriorityFilter("Todas");setTypeFilter("Todos");setLeadFilter("Todos");if(isTaskAdmin)setResponsibleFilter("Todos")};
@@ -318,16 +463,19 @@ export default function TasksModule({ currentUser, leads, onOpenLead, prefillLea
     if(!recipient)return;
     const email=window.prompt(`Correo para ${recipient.name}:`, recipient.email||"");
     if(!email)return;
-    if(!recipient.manual&&email!==recipient.email){
-      try{await updateAlertRecipient(recipient.id,{...recipient,email});await refreshRecipients()}
-      catch(err){console.warn("No pude actualizar correo del responsable",err)}
-    }
     const method=chooseEmailDeliveryMethod();
     if(!method)return;
     const subjectText=buildAlertSubject(task,lead);
     const bodyText=buildAlertBody(task,lead,currentUser?.email||"");
     const openMessage=openEmailComposer(method,email,subjectText,bodyText);
-    try{await registerAlertTrace(task,`por ${method.label}`,`${recipient.name} <${email}>`);alert(`${openMessage} Quedó registrada la trazabilidad en la tarea.`)}
+    try{
+      if(!recipient.manual&&email!==recipient.email){
+        try{await updateAlertRecipient(recipient.id,{...recipient,email});await refreshRecipients()}
+        catch(err){console.warn("No pude actualizar correo del responsable",err)}
+      }
+      await registerAlertTrace(task,`por ${method.label}`,`${recipient.name} <${email}>`);
+      alert(`${openMessage} Quedó registrada la trazabilidad en la tarea.`)
+    }
     catch(err){console.error(err);setError("Se abrió/preparó el correo, pero no pude registrar la trazabilidad en la tarea.")}
   };
 
@@ -338,14 +486,23 @@ export default function TasksModule({ currentUser, leads, onOpenLead, prefillLea
     if(!phone)return;
     const cleanPhone=onlyPhoneDigits(phone);
     if(!cleanPhone){alert("Ingresa un número válido para WhatsApp.");return;}
-    if(!recipient.manual&&cleanPhone!==recipient.whatsapp){
-      try{await updateAlertRecipient(recipient.id,{...recipient,whatsapp:cleanPhone});await refreshRecipients()}
-      catch(err){console.warn("No pude actualizar WhatsApp del responsable",err)}
-    }
     const text=encodeURIComponent(buildAlertBody(task,lead,currentUser?.email||""));
-    window.open(`https://wa.me/${cleanPhone}?text=${text}`,"_blank","noopener,noreferrer");
-    try{await registerAlertTrace(task,"por WhatsApp",`${recipient.name} <+${cleanPhone}>`);alert(`Se abrió WhatsApp para ${recipient.name} con el mensaje prellenado y quedó registrada la trazabilidad en la tarea.`)}
-    catch(err){console.error(err);setError("Se abrió WhatsApp, pero no pude registrar la trazabilidad en la tarea.")}
+    const whatsappUrl=`https://web.whatsapp.com/send?phone=${cleanPhone}&text=${text}`;
+    const openedWindow=window.open(whatsappUrl,"_blank","noopener,noreferrer");
+    if(!openedWindow){
+      const copyText=`https://web.whatsapp.com/send?phone=${cleanPhone}&text=${text}`;
+      try{navigator.clipboard?.writeText(copyText)}catch(err){console.warn("No pude copiar el enlace de WhatsApp",err)}
+      window.prompt("El navegador bloqueó la apertura automática de WhatsApp Web. Copia y abre este enlace manualmente:", copyText);
+    }
+    try{
+      if(!recipient.manual&&cleanPhone!==recipient.whatsapp){
+        try{await updateAlertRecipient(recipient.id,{...recipient,whatsapp:cleanPhone});await refreshRecipients()}
+        catch(err){console.warn("No pude actualizar WhatsApp del responsable",err)}
+      }
+      await registerAlertTrace(task,"por WhatsApp",`${recipient.name} <+${cleanPhone}>`);
+      alert(`Se abrió WhatsApp Web para ${recipient.name} con el mensaje prellenado y quedó registrada la trazabilidad en la tarea.`)
+    }
+    catch(err){console.error(err);setError("Intenté abrir WhatsApp, pero no pude registrar la trazabilidad en la tarea.")}
   };
 
   return <div className="space-y-6">
@@ -396,7 +553,7 @@ export default function TasksModule({ currentUser, leads, onOpenLead, prefillLea
       </div>
     </div>}
 
-    <div className="grid grid-cols-1 xl:grid-cols-[360px_minmax(0,1fr)] gap-6">
+    <div className="grid grid-cols-1 xl:grid-cols-[330px_minmax(0,1fr)] gap-6">
       <div className="space-y-6">
       <aside className="rounded-3xl border bg-white p-5 shadow-sm h-fit">
         <div className="mb-3 text-lg font-semibold">Listas</div>
@@ -467,16 +624,22 @@ export default function TasksModule({ currentUser, leads, onOpenLead, prefillLea
       </section>
       </div>
 
-      <div className="rounded-3xl border bg-white p-5 shadow-sm min-w-0">
+      <div className="rounded-3xl border bg-white p-4 shadow-sm min-w-0">
         <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
           <div>
             <div className="text-lg font-semibold">{activeList==="Todas"?"Todas las tareas":activeList}</div>
-            <div className="text-sm text-slate-500">{loading?"Cargando...":`${visibleTasks.length} tarea(s) visibles de ${tasks.length} total(es)`}</div>
+            <div className="text-sm text-slate-500">{loading?"Cargando...":`${visibleTasks.length} tarea(s) visibles de ${tasks.length} total(es) · ordenadas por prioridad operativa`}</div>
           </div>
-          <div className="flex flex-wrap gap-2">{["Abiertas","Vencidas","Hoy","Próximas","Completadas","Todas"].map((item)=><button key={item} onClick={()=>setFilter(item)} className={`rounded-full border px-3 py-1 text-sm ${filter===item?"bg-slate-900 text-white border-slate-900":"bg-white text-slate-700 border-slate-200"}`}>{item}</button>)}</div>
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="flex rounded-full border border-slate-200 bg-slate-50 p-1">
+              <button onClick={()=>setDisplayMode("list")} className={`rounded-full px-3 py-1 text-sm ${displayMode==="list"?"bg-slate-900 text-white shadow-sm":"text-slate-600"}`}>Lista</button>
+              <button onClick={()=>setDisplayMode("calendar")} className={`rounded-full px-3 py-1 text-sm ${displayMode==="calendar"?"bg-slate-900 text-white shadow-sm":"text-slate-600"}`}>Calendario</button>
+            </div>
+            {["Abiertas","Vencidas","Hoy","Próximas","Completadas","Todas"].map((item)=><button key={item} onClick={()=>setFilter(item)} className={`rounded-full border px-3 py-1 text-sm ${filter===item?"bg-slate-900 text-white border-slate-900":"bg-white text-slate-700 border-slate-200"}`}>{item}</button>)}
+          </div>
         </div>
 
-        <div className="mb-5 rounded-3xl border border-slate-200 bg-slate-50 p-5 shadow-sm">
+        <div className="mb-3 rounded-3xl border border-slate-200 bg-slate-50 p-4 shadow-sm">
           <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
             <div>
               <div className="text-sm font-semibold text-slate-800">Búsqueda y filtros</div>
@@ -488,11 +651,11 @@ export default function TasksModule({ currentUser, leads, onOpenLead, prefillLea
             </div>
           </div>
 
-          <div className="space-y-4">
+          <div className="space-y-3">
             <div>
               <label className="mb-1.5 block text-xs font-semibold text-slate-500">Buscar tarea, empresa, proyecto o nota</label>
               <input
-                className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none transition focus:border-slate-400 focus:ring-4 focus:ring-slate-100"
+                className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-2.5 text-sm outline-none transition focus:border-slate-400 focus:ring-4 focus:ring-slate-100"
                 placeholder="Ej: Casablanca, cotización, urgente..."
                 value={searchQuery}
                 onChange={(e)=>setSearchQuery(e.target.value)}
@@ -502,21 +665,21 @@ export default function TasksModule({ currentUser, leads, onOpenLead, prefillLea
             <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
               <div>
                 <label className="mb-1.5 block text-xs font-semibold text-slate-500">Prioridad</label>
-                <select className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm" value={priorityFilter} onChange={(e)=>setPriorityFilter(e.target.value)}>
+                <select className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-2.5 text-sm" value={priorityFilter} onChange={(e)=>setPriorityFilter(e.target.value)}>
                   <option>Todas</option>
                   {TASK_PRIORITIES.map((item)=><option key={item}>{item}</option>)}
                 </select>
               </div>
               <div>
                 <label className="mb-1.5 block text-xs font-semibold text-slate-500">Tipo de tarea</label>
-                <select className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm" value={typeFilter} onChange={(e)=>setTypeFilter(e.target.value)}>
+                <select className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-2.5 text-sm" value={typeFilter} onChange={(e)=>setTypeFilter(e.target.value)}>
                   <option>Todos</option>
                   {TASK_TYPES.map((item)=><option key={item}>{item}</option>)}
                 </select>
               </div>
               <div>
                 <label className="mb-1.5 block text-xs font-semibold text-slate-500">Lead asociado</label>
-                <select className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm" value={leadFilter} onChange={(e)=>setLeadFilter(e.target.value)}>
+                <select className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-2.5 text-sm" value={leadFilter} onChange={(e)=>setLeadFilter(e.target.value)}>
                   <option>Todos</option>
                   <option>Con lead</option>
                   <option>Sin lead</option>
@@ -524,7 +687,7 @@ export default function TasksModule({ currentUser, leads, onOpenLead, prefillLea
               </div>
               {isTaskAdmin&&<div>
                 <label className="mb-1.5 block text-xs font-semibold text-slate-500">Responsable</label>
-                <select className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm" value={responsibleFilter} onChange={(e)=>setResponsibleFilter(e.target.value)}>
+                <select className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-2.5 text-sm" value={responsibleFilter} onChange={(e)=>setResponsibleFilter(e.target.value)}>
                   <option value="Todos">Todos</option>
                   {taskUserOptions.map((user)=><option key={user.user_id||user.id} value={user.user_id||user.id}>{getTaskUserLabel(user)}</option>)}
                 </select>
@@ -533,11 +696,64 @@ export default function TasksModule({ currentUser, leads, onOpenLead, prefillLea
           </div>
           {hasAdvancedFilters&&<div className="mt-4 rounded-2xl border border-slate-200 bg-white px-4 py-2 text-xs text-slate-500">Filtro activo · mostrando {visibleTasks.length} resultado(s) de {tasks.length} tarea(s) total(es).</div>}
         </div>
-        <div className="space-y-2 max-h-[82vh] overflow-y-auto pr-2">
-          {visibleTasks.length?visibleTasks.map((task)=>{const lead=task.lead_id?leadMap.get(String(task.lead_id)):null;const bucket=taskBucket(task);const alertTraces=getAlertTraceLines(task.description).map(formatAlertTrace);const cleanDescription=cleanTaskDescription(task.description);return <div key={task.id} className={`rounded-2xl border p-3 text-sm shadow-sm ${bucket==="Vencidas"?"border-red-200 bg-red-50/40":"border-slate-200 bg-white"}`}>
+        {displayMode==="calendar"&&<div className="mb-4 rounded-3xl border border-slate-200 bg-white p-4 shadow-sm">
+          <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <div className="text-base font-semibold text-slate-900">Calendario de tareas</div>
+              <div className="text-sm capitalize text-slate-500">{calendarTitle(calendarView,calendarDate)}</div>
+              <div className="mt-1 text-xs text-slate-500">Haz clic para editar una tarea. Arrastra una tarea a otro día para cambiar su fecha.</div>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <ActionButton small onClick={()=>moveCalendar(-1)}>← Anterior</ActionButton>
+              <ActionButton small onClick={()=>setCalendarDate(todayString())}>Hoy</ActionButton>
+              <ActionButton small onClick={()=>moveCalendar(1)}>Siguiente →</ActionButton>
+              <div className="flex rounded-full border border-slate-200 bg-slate-50 p-1">
+                {[{id:"day",label:"Día"},{id:"week",label:"Semana"},{id:"month",label:"Mes"}].map((view)=><button key={view.id} onClick={()=>setCalendarView(view.id)} className={`rounded-full px-3 py-1 text-sm ${calendarView===view.id?"bg-slate-900 text-white shadow-sm":"text-slate-600"}`}>{view.label}</button>)}
+              </div>
+            </div>
+          </div>
+
+          {calendarActionMessage&&<div className="mb-3 rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-2 text-sm text-emerald-700">{calendarActionMessage}</div>}
+
+          <div className={`grid gap-2 ${calendarView==="day"?"grid-cols-1":calendarView==="week"?"grid-cols-1 md:grid-cols-7":"grid-cols-2 md:grid-cols-7"}`}>
+            {calendarDates.map((dateKey)=>{const dayTasks=calendarTasksByDate.get(dateKey)||[];const isToday=dateKey===todayString();const muted=calendarView==="month"&&!isSameMonth(dateKey,calendarDate);return <div key={dateKey} onDragOver={handleCalendarDragOver} onDrop={(event)=>handleCalendarDrop(event,dateKey)} style={{minHeight:calendarView==="month"?"150px":"280px"}} className={`rounded-2xl border p-2 transition ${draggingTaskId?"ring-2 ring-blue-100":""} ${isToday?"border-blue-300 bg-blue-50/50":muted?"border-slate-100 bg-slate-50/60 text-slate-400":"border-slate-200 bg-slate-50/40"}`}>
+              <div className="mb-2 flex items-center justify-between gap-2">
+                <div className={`text-xs font-bold uppercase ${isToday?"text-blue-700":"text-slate-500"}`}>{dayLabel(dateKey,calendarView!=="day")}</div>
+                <span className="rounded-full bg-white px-2 py-0.5 text-[11px] font-semibold text-slate-500 shadow-sm">{dayTasks.length}</span>
+              </div>
+              <div className="space-y-1.5 max-h-[240px] overflow-y-auto pr-1">
+                {dayTasks.length?dayTasks.map((task)=>{const lead=task.lead_id?leadMap.get(String(task.lead_id)):null;const workLabel=operationalPriorityLabel(task);return <button key={`${dateKey}-${task.id}`} type="button" draggable onDragStart={(event)=>handleCalendarDragStart(event,task)} onDragEnd={handleCalendarDragEnd} onClick={()=>startEdit(task)} title="Haz clic para editar. Arrastra para reprogramar." className={`w-full cursor-move rounded-xl border px-2 py-1.5 text-left text-xs shadow-sm transition hover:-translate-y-0.5 hover:shadow ${String(draggingTaskId)===String(task.id)?"opacity-60 ring-2 ring-blue-300":""} ${calendarTaskBorder(task)}`}>
+                  <div className="flex items-start justify-between gap-2">
+                    <span className="font-semibold text-slate-800">{task.due_time?`${task.due_time} · `:""}{task.title||"Sin título"}</span>
+                    <span className={`shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-bold ${operationalPriorityClass(workLabel)}`}>{workLabel}</span>
+                  </div>
+                  <div className="mt-1 text-[11px] text-slate-500">{getAssigneeLabel(task.assigned_to)}</div>
+                  <div className="text-[11px] text-slate-500" style={{display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical",overflow:"hidden"}}>{getLeadLabel(lead)}</div>
+                </button>}):<div className="rounded-xl border border-dashed border-slate-200 bg-white/70 p-3 text-center text-xs text-slate-400">Sin tareas</div>}
+              </div>
+            </div>})}
+          </div>
+
+          <div onDragOver={handleCalendarDragOver} onDrop={handleUndatedDrop} className={`mt-4 rounded-2xl border p-3 transition ${draggingTaskId?"border-amber-400 bg-amber-100":"border-amber-200 bg-amber-50"}`}>
+            <div className="mb-2 flex items-center justify-between gap-2">
+              <div>
+                <div className="text-sm font-semibold text-amber-800">Tareas sin fecha</div>
+                <div className="text-xs text-amber-700">Arrastra aquí una tarea para quitarle la fecha o dejarla pendiente de programación.</div>
+              </div>
+              <div className="text-xs font-semibold text-amber-700">{undatedCalendarTasks.length} pendiente(s)</div>
+            </div>
+            {undatedCalendarTasks.length>0?<div className="flex flex-wrap gap-2">
+              {undatedCalendarTasks.slice(0,18).map((task)=><button key={`undated-${task.id}`} type="button" draggable onDragStart={(event)=>handleCalendarDragStart(event,task)} onDragEnd={handleCalendarDragEnd} onClick={()=>startEdit(task)} title="Haz clic para editar. Arrastra a un día para programar." className={`cursor-move rounded-full border border-amber-200 bg-white px-3 py-1 text-xs font-medium text-amber-800 shadow-sm hover:bg-amber-100 ${String(draggingTaskId)===String(task.id)?"opacity-60 ring-2 ring-amber-300":""}`}>{task.title||"Sin título"} · {getAssigneeLabel(task.assigned_to)}</button>)}
+              {undatedCalendarTasks.length>18&&<span className="rounded-full bg-amber-100 px-3 py-1 text-xs font-semibold text-amber-800">+{undatedCalendarTasks.length-18} más</span>}
+            </div>:<div className="rounded-xl border border-dashed border-amber-200 bg-white/70 p-3 text-center text-xs text-amber-700">No hay tareas sin fecha con los filtros actuales.</div>}
+          </div>
+        </div>}
+
+        {displayMode==="list"&&<div className="space-y-2 max-h-[105vh] overflow-y-auto pr-2">
+          {visibleTasks.length?visibleTasks.map((task)=>{const lead=task.lead_id?leadMap.get(String(task.lead_id)):null;const bucket=taskBucket(task);const workLabel=operationalPriorityLabel(task);const alertTraces=getAlertTraceLines(task.description).map(formatAlertTrace);const cleanDescription=cleanTaskDescription(task.description);return <div key={task.id} className={`rounded-2xl border p-2.5 text-sm shadow-sm ${bucket==="Vencidas"?"border-red-200 bg-red-50/40":"border-slate-200 bg-white"}`}>
             <div className="flex flex-wrap items-start justify-between gap-3">
-              <div className="min-w-0"><div className="text-base font-semibold text-slate-900">{task.title}</div><div className="mt-1 whitespace-pre-line text-slate-500">{cleanDescription||"Sin descripción"}</div></div>
-              <div className="flex flex-wrap gap-2"><span className="rounded-full border border-slate-200 bg-slate-50 px-2.5 py-1 text-xs font-semibold text-slate-600">{getTaskList(task)}</span><span className={`rounded-full border px-2.5 py-1 text-xs font-semibold ${badgeClass(bucket)}`}>{bucket}</span><span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${priorityClass(task.priority)}`}>{task.priority}</span></div>
+              <div className="min-w-0"><div className="text-base font-semibold text-slate-900">{task.title}</div><div className="mt-1 whitespace-pre-line text-slate-500" style={{display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical",overflow:"hidden"}}>{cleanDescription||"Sin descripción"}</div></div>
+              <div className="flex flex-wrap gap-2"><span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${operationalPriorityClass(workLabel)}`}>{workLabel}</span><span className="rounded-full border border-slate-200 bg-slate-50 px-2.5 py-1 text-xs font-semibold text-slate-600">{getTaskList(task)}</span><span className={`rounded-full border px-2.5 py-1 text-xs font-semibold ${badgeClass(bucket)}`}>{bucket}</span><span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${priorityClass(task.priority)}`}>{task.priority}</span></div>
             </div>
             <div className="mt-2 grid grid-cols-1 md:grid-cols-4 gap-2 text-xs text-slate-600">
               <div className="rounded-xl bg-slate-50 px-3 py-1.5"><div className="text-slate-400">Tipo</div><div className="font-medium">{task.task_type}</div></div>
@@ -547,7 +763,7 @@ export default function TasksModule({ currentUser, leads, onOpenLead, prefillLea
             </div>
             {alertTraces.length>0&&<div className="mt-2 rounded-xl border border-slate-200 bg-white p-2.5 text-xs text-slate-600">
               <div className="mb-1.5 font-semibold text-slate-800">Historial de alertas</div>
-              <div className="space-y-1.5">
+              <div className="space-y-1.5 max-h-28 overflow-y-auto pr-1">
                 {alertTraces.map((trace,index)=><div key={`${task.id}-trace-${index}`} className="grid grid-cols-1 gap-1 rounded-lg bg-slate-50 px-2.5 py-1.5 md:grid-cols-4">
                   <div><span className="text-slate-400">Fecha</span><br/><span className="font-medium text-slate-700">{trace.date||"Sin fecha"}</span></div>
                   <div><span className="text-slate-400">Canal</span><br/><span className="font-medium text-slate-700">{trace.channel}</span></div>
@@ -557,15 +773,15 @@ export default function TasksModule({ currentUser, leads, onOpenLead, prefillLea
               </div>
             </div>}
             <div className="mt-2 flex flex-wrap justify-end gap-2">
-              {bucket==="Vencidas"&&task.status!=="Completada"&&<ActionButton small onClick={()=>sendOverdueEmailAlert(task,lead)}>Correo responsable</ActionButton>}
-              {bucket==="Vencidas"&&task.status!=="Completada"&&<ActionButton small onClick={()=>sendOverdueWhatsAppAlert(task,lead)}>WhatsApp responsable</ActionButton>}
+              {task.status!=="Completada"&&task.status!=="Cancelada"&&<ActionButton small onClick={()=>sendOverdueEmailAlert(task,lead)}>Correo responsable</ActionButton>}
+              {task.status!=="Completada"&&task.status!=="Cancelada"&&<ActionButton small onClick={()=>sendOverdueWhatsAppAlert(task,lead)}>WhatsApp responsable</ActionButton>}
               {lead&&<ActionButton small onClick={()=>onOpenLead?.(lead.id)}>Abrir lead</ActionButton>}
               <ActionButton small onClick={()=>startEdit(task)}>Editar</ActionButton>
               {task.status!=="Completada"&&<ActionButton small secondary onClick={()=>markComplete(task.id)}>Completar</ActionButton>}
               {(canDeleteTasks||String(task.assigned_to)===String(userId))&&<ActionButton small danger onClick={()=>removeTask(task)}>Eliminar</ActionButton>}
             </div>
           </div>}):<div className="rounded-2xl border border-dashed border-slate-200 bg-slate-50 p-8 text-center text-sm text-slate-500">No hay tareas para este filtro, búsqueda o lista.</div>}
-        </div>
+        </div>}
       </div>
     </div>
   </div>
